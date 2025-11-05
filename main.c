@@ -1,142 +1,35 @@
-#include "box.h"
 #define _DEFAULT_SOURCE
-#include "error_functions.h"
+#include "box.h"
+#include "errfunc.h"
+#include "estring.h"
+#include "log.h"
+#include "modes.h"
+#include "tutils.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 
 struct termios usertp;
-
-void pb(int n)
-{
-    short int found = 0;
-    printf("0b");
-    for (int i = (sizeof(int) * 8) - 1; i >= 0; i--) {
-        if (n & (1 << i)) {
-            found = 1;
-            putchar('1');
-        }
-        else if (found) {
-            putchar('0');
-        }
-    }
-    if (!found) putchar('0');
-    putchar('\n');
-}
-
-void animate(char *buf, int len)
-{
-    printf("buf: %.*s\n", len - 1, buf);
-
-    for (;;) {
-        char temp = buf[0];
-        for (int i = 0; i < len - 1; i++)
-            buf[i] = buf[i + 1];
-        buf[len - 1] = temp;
-
-        usleep(50 * 1000);
-        printf("\x1b[A"); // move cursor up one line
-        printf("buf: %.*s\n", len - 1, buf);
-    }
-}
-
-int ttySetCbreak(int fd, struct termios *current_tty)
-{
-    struct termios t;
-
-    if (tcgetattr(fd, &t) == -1) {
-        return -1;
-    }
-
-    if (current_tty != NULL) {
-        *current_tty = t;
-    }
-
-    t.c_lflag |= ISIG;
-    t.c_lflag &= ~(ICANON | ECHO);
-    t.c_iflag &= ~ICRNL;
-
-    t.c_cc[VMIN] = 1;
-    t.c_cc[VTIME] = 0;
-
-    if (tcsetattr(fd, TCSAFLUSH, &t) == -1) {
-        return -1;
-    }
-
-    return 0;
-}
-
-int ttySetRaw(int fd, struct termios *current_tty)
-{
-    struct termios t;
-
-    if (tcgetattr(fd, &t) == -1) {
-        return -1;
-    }
-
-    if (current_tty != NULL) {
-        *current_tty = t;
-    }
-
-    t.c_lflag &= ~(ICANON | ISIG | IEXTEN | ECHO);
-    t.c_iflag &= ~(BRKINT | ICRNL | INLCR | IGNCR | IGNBRK | INPCK | ISTRIP | IXON | PARMRK);
-    t.c_oflag &= ~OPOST;
-
-    t.c_cc[VMIN] = 1;
-    t.c_cc[VTIME] = 0;
-
-    if (tcsetattr(fd, TCSAFLUSH, &t) == -1) {
-        return -1;
-    }
-
-    return 0;
-}
-
-int log_file(const char *msg, int msg_len)
-{
-    int fd = open("./log", O_RDWR | O_CREAT | O_APPEND, 0644);
-    if (fd == -1)
-        return -1;
-
-    time_t t = time(NULL);
-    struct tm time_info;
-    localtime_r(&t, &time_info);
-
-    char timebuf[64];
-    strftime(timebuf, sizeof(timebuf), "[%T]", &time_info);
-
-    if (write(fd, timebuf, strlen(timebuf)) == -1) {
-        close(fd);
-        return -1;
-    }
-
-    if (write(fd, msg, msg_len) == -1) {
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    return 0;
-}
 
 static void handler(int sig)
 {
     (void)sig;
 
-    char *msg = "from SIGTSTP";
-    if (log_file(msg, strlen(msg)) == -1) {
+    qtaltbuf();
+
+    if (log_file("%s", "from SIGTSTP") == -1) {
         perror("log_file");
         exit(EXIT_FAILURE);
     }
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &usertp) == -1)
-        errExit("tcsetattr");
+        err_exit("tcsetattr");
 
     _exit(EXIT_SUCCESS);
 }
@@ -154,14 +47,14 @@ static void tstp_handler(int sig)
 
     struct termios tp;
     if (tcgetattr(STDIN_FILENO, &tp) == -1)
-        errExit("tcgetattr");
+        err_exit("tcgetattr");
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &usertp) == -1)
-        errExit("tcsetattr");
+        err_exit("tcsetattr");
 
     // Set SIGTSTP to Kernel default handler
     if (signal(SIGTSTP, SIG_DFL) == SIG_ERR)
-        errExit("signal");
+        err_exit("signal");
 
     // Send the SIGTSTP to the current process →
     raise(SIGTSTP);
@@ -170,24 +63,24 @@ static void tstp_handler(int sig)
     sigemptyset(&tstp_mask);
     sigaddset(&tstp_mask, SIGTSTP);
     if (sigprocmask(SIG_UNBLOCK, &tstp_mask, &prev_mask) == -1)
-        errExit("sigprocmask unblock");
+        err_exit("sigprocmask unblock");
 
     // The following code runs after recevining the signal SIGCONT
     if (sigprocmask(SIG_SETMASK, &prev_mask, NULL) == -1)
-        errExit("sigprocmask setmask");
+        err_exit("sigprocmask setmask");
 
     struct sigaction sa;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     sa.sa_handler = tstp_handler;
     if (sigaction(SIGTSTP, &sa, NULL) == -1)
-        errExit("sigaction");
+        err_exit("sigaction");
 
     if (tcgetattr(STDIN_FILENO, &usertp) == -1)
-        errExit("tcgetattr");
+        err_exit("tcgetattr");
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &tp) == -1)
-        errExit("tcsetattr");
+        err_exit("tcsetattr");
 
     errno = saved_errno;
 }
@@ -211,59 +104,102 @@ int main(int argc, char *argv[])
 
     if (argc > 1) {
         if (ttySetCbreak(STDIN_FILENO, &tp) == -1)
-            errExit("ttySetCbreak");
+            err_exit("ttySetCbreak");
 
         // Handle following signals:
         // 1. SIGINT
         // 2. SIGQUIT
         // 3. SIGTSTP
         if (sigaction(SIGQUIT, NULL, &prev) == -1)
-            errExit("sigaction SIGQUIT");
+            err_exit("sigaction SIGQUIT");
         if (prev.sa_handler != SIG_IGN)
             if (sigaction(SIGQUIT, &sa, NULL) == -1)
-                errExit("sigaction SIGQUIT");
+                err_exit("sigaction SIGQUIT");
 
         if (sigaction(SIGINT, NULL, &prev) == -1)
-            errExit("sigaction SIGINT");
+            err_exit("sigaction SIGINT");
         if (prev.sa_handler != SIG_IGN)
             if (sigaction(SIGINT, &sa, NULL) == -1)
-                errExit("sigaction SIGINT");
+                err_exit("sigaction SIGINT");
 
         sa.sa_handler = tstp_handler;
         if (sigaction(SIGTSTP, NULL, &prev) == -1)
-            errExit("sigaction SIGTSTP");
+            err_exit("sigaction SIGTSTP");
         if (prev.sa_handler != SIG_IGN)
             if (sigaction(SIGTSTP, &sa, NULL) == -1)
-                errExit("sigaction SIGTSTP");
+                err_exit("sigaction SIGTSTP");
     }
     else {
         if (ttySetRaw(STDIN_FILENO, &usertp) == -1)
-            errExit("ttySetRaw");
+            err_exit("ttySetRaw");
     }
 
     sa.sa_handler = handler;
     setbuf(stdout, NULL);
 
+    savestate();
+    srtaltbuf();
+    clrscreen();
+    pos0();
+
+    /* for (int i = 0; i < 40; i++) { */
+    /*     printf("i: %d\r\n", i); */
+    /*     usleep(50000); */
+    /* } */
+    /* qtaltbuf(); */
+    /* restorestate(); */
+    /* if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &usertp) == -1) */
+    /*     err_exit("tcsetattr"); */
+    /* return 0; */
+
     int n;
     char ch;
+
+    n = read(STDIN_FILENO, &ch, 1);
+    if (n == 0)
+        return EXIT_SUCCESS;
+
+    string_t str = str_init();
+    str_append(str, &ch, 1);
+    struct box *b = box_init(0, 0, str);
+
+    box_draw(b);
+
     for (;;) {
         n = read(STDIN_FILENO, &ch, 1);
         if (n == 0)
             break;
 
-        putchar(ch);
-
-        if (ch == 27) {
+        if (ch == 27) { // esc character
             char *msg = "esc character received\n";
             log_file(msg, strlen(msg));
+            continue;
         }
-
+        if (ch == 13) { // newline -> carriage return
+            if (b->text->len == 0) {
+                putchar('\n');
+            }
+            else {
+                box_done(b);
+                box_new(b);
+            }
+            continue;
+        }
         if (ch == 'q')
             break;
+
+        if (b->text->len == 0) {
+            str_append(b->text, &ch, 1);
+            box_draw(b);
+            continue;
+        }
+        box_addcolumn(b, ch);
     }
 
+    qtaltbuf();
+    restorestate();
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &usertp) == -1)
-        errExit("tcsetattr");
+        err_exit("tcsetattr");
 
     return EXIT_SUCCESS;
 }
